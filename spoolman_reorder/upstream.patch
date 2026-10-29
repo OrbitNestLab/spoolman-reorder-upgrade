@@ -1,0 +1,1088 @@
+--- /dev/null
++++ b/spoolman/reorder.py
+@@ -0,0 +1,142 @@
++"""Manufacturer-independent, read-only stock planning."""
++
++from __future__ import annotations
++
++import json
++import math
++from collections import defaultdict
++from dataclasses import dataclass
++from urllib.parse import urlsplit
++
++
++@dataclass(frozen=True)
++class ReorderPolicy:
++    threshold_g: float = 150
++    unopened_min: int = 1
++    order_qty: int = 1
++
++    def __post_init__(self) -> None:
++        if isinstance(self.threshold_g, bool) or not isinstance(self.threshold_g, (int, float)):
++            raise ValueError("threshold_g must be a finite, non-negative number")
++        if not math.isfinite(self.threshold_g) or self.threshold_g < 0:
++            raise ValueError("threshold_g must be a finite, non-negative number")
++        for name, minimum in (("unopened_min", 0), ("order_qty", 1)):
++            value = getattr(self, name)
++            if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
++                raise ValueError(f"{name} must be an integer of at least {minimum}")
++
++    @classmethod
++    def from_dict(cls, value: dict, default: ReorderPolicy | None = None) -> ReorderPolicy:
++        if not isinstance(value, dict) or set(value) - {"threshold_g", "unopened_min", "order_qty"}:
++            raise ValueError("Policy must contain only threshold_g, unopened_min and order_qty")
++        base = default or cls()
++        return cls(**{key: value.get(key, getattr(base, key)) for key in base.__dataclass_fields__})
++
++
++@dataclass(frozen=True)
++class ReorderItem:
++    profile: str
++    filament_id: int
++    remaining_g: float
++    unopened: int
++    order_qty: int
++    unknown_spools: int = 0
++    needs_reorder: bool = True
++
++
++def profile_key(*, vendor: str | None, material: str | None, name: str | None,
++                color: str | None = None, finish: str | None = None) -> str:
++    """Include colour/finish and use JSON to avoid delimiter collisions."""
++    return json.dumps([" ".join((v or "").strip().casefold().split())
++                       for v in (vendor, material, name, color, finish)], ensure_ascii=False)
++
++
++def calculate_reorders(rows: list[dict], defaults: ReorderPolicy,
++                       overrides: dict[str, ReorderPolicy] | None = None,
++                       *, include_sufficient: bool = False) -> list[ReorderItem]:
++    """Aggregate opened grams separately from unopened reserves.
++
++    Unknown weights block automatic ordering. Archived rows and repeated
++    spool IDs never count. A minimum reserve of zero disables ordering.
++    """
++    groups: dict[str, dict] = {}
++    seen: set[int] = set()
++    for row in rows:
++        if row.get("archived", False):
++            continue
++        spool_id = row.get("spool_id")
++        if spool_id is not None:
++            if spool_id in seen:
++                continue
++            seen.add(spool_id)
++        group = groups.setdefault(row["profile"], {"filament_id": row["filament_id"],
++                                  "remaining": 0.0, "unopened": 0, "unknown": 0})
++        remaining = row.get("remaining_g")
++        if remaining is None or not math.isfinite(float(remaining)):
++            group["unknown"] += 1
++        elif row.get("unused", False) and remaining > 0:
++            group["unopened"] += 1
++        else:
++            group["remaining"] += max(float(remaining), 0)
++    result = []
++    for key, group in groups.items():
++        policy = (overrides or {}).get(key, defaults)
++        needs = (group["unknown"] == 0 and group["remaining"] <= policy.threshold_g
++                 and group["unopened"] < policy.unopened_min)
++        if needs or include_sufficient:
++            result.append(ReorderItem(key, group["filament_id"], group["remaining"], group["unopened"],
++                          max(policy.order_qty, policy.unopened_min - group["unopened"]),
++                          group["unknown"], needs))
++    return sorted(result, key=lambda item: item.profile)
++
++
++def shopify_cart_url(base_url: str, variant_ids: list[tuple[str, int]]) -> str | None:
++    """Build a permalink using an HTTPS origin. Never contact the shop."""
++    try:
++        parts = urlsplit(base_url)
++        valid_origin = (parts.scheme == "https" and parts.hostname and not parts.username
++                        and not parts.password and parts.port in (None, 443)
++                        and parts.path in ("", "/") and not parts.query and not parts.fragment)
++    except (ValueError, AttributeError):
++        return None
++    if not valid_origin or not variant_ids:
++        return None
++    quantities: dict[str, int] = defaultdict(int)
++    for variant, qty in variant_ids:
++        if (not isinstance(variant, str) or not variant.isascii() or not variant.isdigit()
++                or int(variant) <= 0 or isinstance(qty, bool) or not isinstance(qty, int) or qty < 1):
++            return None
++        quantities[variant] += qty
++    cart = ",".join(f"{variant}:{qty}" for variant, qty in sorted(quantities.items()))
++    return f"{base_url.rstrip('/')}/cart/{cart}?storefront=true"
++
++
++def validate_reorder_setting(key: str, obj: object) -> None:
++    """Validate before persistence so malformed settings cannot break reads."""
++    if not key.startswith("reorder_"):
++        return
++    if not isinstance(obj, dict):
++        raise ValueError("Reorder settings must be objects")
++    if key == "reorder_defaults":
++        ReorderPolicy.from_dict(obj)
++    elif key == "reorder_profiles":
++        for value in obj.values():
++            ReorderPolicy.from_dict(value)
++    elif key == "reorder_stock":
++        if set(obj) - {"unopened_locations"}:
++            raise ValueError("Unknown stock setting")
++        locations = obj.get("unopened_locations", [])
++        if not isinstance(locations, list) or any(not isinstance(v, str) or not v.strip() for v in locations):
++            raise ValueError("unopened_locations must be a list of non-empty location names")
++    elif key == "reorder_providers":
++        if set(obj) - {"base_url", "variants"}:
++            raise ValueError("Unknown provider setting")
++        base = obj.get("base_url", "")
++        if not isinstance(base, str) or (base and not shopify_cart_url(base, [("1", 1)])):
++            raise ValueError("Shop URL must be an HTTPS origin without path, credentials or query")
++        variants = obj.get("variants", {})
++        if not isinstance(variants, dict):
++            raise ValueError("variants must be an object")
++        for variant in variants.values():
++            if variant and not shopify_cart_url("https://example.com", [(variant, 1)]):
++                raise ValueError("Variant IDs must be positive ASCII numbers stored as strings")
+--- a/spoolman/settings.py
++++ b/spoolman/settings.py
+@@ -29,6 +29,10 @@
+     def validate_type(self, value: str) -> None:  # noqa: C901
+         """Validate that the value has the correct type."""
+         obj = json.loads(value)
++        if self.key.startswith("reorder_"):
++            from spoolman.reorder import validate_reorder_setting
++
++            validate_reorder_setting(self.key, obj)
+         if self.type == SettingType.BOOLEAN:
+             if not isinstance(obj, bool):
+                 raise ValueError(f"Setting {self.key} must be a boolean.")
+@@ -80,3 +84,8 @@
+ # dashboard_spoolorders maps a field key to a group key to its ordered spool ids.
+ register_setting("dashboard_groups", SettingType.OBJECT, json.dumps({}))
+ register_setting("dashboard_spoolorders", SettingType.OBJECT, json.dumps({}))
++
++register_setting("reorder_defaults", SettingType.OBJECT, json.dumps({"threshold_g": 150, "unopened_min": 1, "order_qty": 1}))
++register_setting("reorder_profiles", SettingType.OBJECT, json.dumps({}))
++register_setting("reorder_providers", SettingType.OBJECT, json.dumps({}))
++register_setting("reorder_stock", SettingType.OBJECT, json.dumps({"unopened_locations": []}))
+--- /dev/null
++++ b/spoolman/api/v1/reorder.py
+@@ -0,0 +1,114 @@
++"""Read-only reorder planning; policies use the existing settings API and DB."""
++
++import json
++import os
++from dataclasses import asdict
++from pathlib import Path
++from typing import Annotated
++
++from fastapi import APIRouter, Depends, HTTPException
++from pydantic import BaseModel
++from sqlalchemy import select
++from sqlalchemy.ext.asyncio import AsyncSession
++from sqlalchemy.orm import selectinload
++
++from spoolman.database import setting
++from spoolman.database.database import get_db_session
++from spoolman.database.models import Filament, Spool
++from spoolman.exceptions import ItemNotFoundError
++from spoolman.reorder import ReorderPolicy, calculate_reorders, profile_key, shopify_cart_url
++from spoolman.settings import parse_setting
++
++router = APIRouter(prefix="/reorder", tags=["reorder"])
++
++
++class ReorderResponse(BaseModel):
++    profile: str
++    filament_id: int
++    remaining_g: float
++    unopened: int
++    order_qty: int
++    unknown_spools: int
++    needs_reorder: bool
++    vendor: str | None
++    material: str | None
++    name: str | None
++    color: str | None
++    weight: float | None
++    threshold_g: float
++    unopened_min: int
++    variant_id: str | None = None
++    cart_url: str | None = None
++
++
++async def _setting_value(db: AsyncSession, key: str) -> dict:
++    definition = parse_setting(key)
++    try:
++        raw = (await setting.get(db, definition)).value
++    except ItemNotFoundError:
++        raw = definition.default
++    return json.loads(raw)
++
++
++@router.get("/catalog", summary="Get the optional provider catalog")
++@router.get("/bambu-catalog", include_in_schema=False)
++async def catalog() -> list[dict]:
++    """The HA package opts in with a file; the generic core has no vendor data."""
++    path = os.environ.get("SPOOLMAN_REORDER_CATALOG")
++    if not path:
++        return []
++    try:
++        return json.loads(Path(path).read_text(encoding="utf-8"))
++    except (OSError, ValueError) as exc:
++        raise HTTPException(503, "Optional provider catalog is unavailable") from exc
++
++
++@router.get("", response_model=list[ReorderResponse])
++async def find(db: Annotated[AsyncSession, Depends(get_db_session)],
++               include_sufficient: bool = False) -> list[ReorderResponse]:
++    """Only read inventory; unknown weight never triggers a suggestion."""
++    try:
++        defaults = ReorderPolicy.from_dict(await _setting_value(db, "reorder_defaults"))
++        raw_profiles = await _setting_value(db, "reorder_profiles")
++        policies = {key: ReorderPolicy.from_dict(value, defaults) for key, value in raw_profiles.items()}
++        provider = await _setting_value(db, "reorder_providers")
++        stock = await _setting_value(db, "reorder_stock")
++    except (ValueError, TypeError, AttributeError) as exc:
++        raise HTTPException(422, "Invalid reorder settings; reset them in Settings") from exc
++    reserve_locations = set(stock.get("unopened_locations", []))
++    result = await db.execute(select(Spool).where(Spool.archived.is_not(True)).options(
++        selectinload(Spool.filament).selectinload(Filament.vendor)))
++    rows, metadata = [], {}
++    for spool in result.scalars().all():
++        f = spool.filament
++        vendor = f.vendor.name if f.vendor else None
++        color = f.multi_color_hexes or f.color_hex
++        key = profile_key(vendor=vendor, material=f.material, name=f.name, color=color,
++                          finish=f.multi_color_direction)
++        if not f.name and not color:
++            key += f":{f.id}"
++        initial = spool.initial_weight if spool.initial_weight is not None else f.weight
++        remaining = max(initial - spool.used_weight, 0) if initial is not None else None
++        unused = (remaining is not None and remaining > 0 and spool.used_weight == 0
++                  and (spool.location in reserve_locations
++                       or (spool.first_used is None and spool.last_used is None)))
++        metadata[key] = dict(vendor=vendor, material=f.material, name=f.name, color=color, weight=f.weight)
++        rows.append(dict(profile=key, spool_id=spool.id, filament_id=f.id, remaining_g=remaining, unused=unused))
++    response = []
++    for item in calculate_reorders(rows, defaults, policies, include_sufficient=include_sufficient):
++        policy = policies.get(item.profile, defaults)
++        variant = provider.get("variants", {}).get(item.profile) or None
++        url = shopify_cart_url(provider.get("base_url", ""), [(variant, item.order_qty)]) if variant else None
++        response.append(ReorderResponse(**asdict(item), **metadata[item.profile], threshold_g=policy.threshold_g,
++                        unopened_min=policy.unopened_min, variant_id=variant if url else None, cart_url=url))
++    return response
++
++
++@router.get("/cart")
++async def cart(db: Annotated[AsyncSession, Depends(get_db_session)]) -> dict:
++    """Aggregate repeated variant IDs into one permalink and list unmapped rows."""
++    items = await find(db, include_sufficient=False)
++    provider = await _setting_value(db, "reorder_providers")
++    mapped = [(item.variant_id, item.order_qty) for item in items if item.cart_url and item.variant_id]
++    return {"url": shopify_cart_url(provider.get("base_url", ""), mapped),
++            "excluded": [item.profile for item in items if not item.cart_url]}
+--- a/spoolman/api/v1/router.py
++++ b/spoolman/api/v1/router.py
+@@ -16,7 +16,7 @@
+ from spoolman.externaldb import get_external_db_name
+ from spoolman.ws import websocket_manager
+ 
+-from . import export, externaldb, field, filament, models, other, search, setting, spool, tag, vendor
++from . import export, externaldb, field, filament, models, other, reorder, search, setting, spool, tag, vendor
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -116,3 +116,4 @@
+ app.include_router(export.router)
+ app.include_router(search.router)
+ app.include_router(tag.router)
++app.include_router(reorder.router)
+--- /dev/null
++++ b/tests/test_reorder.py
+@@ -0,0 +1,121 @@
++import asyncio
++import json
++from datetime import datetime
++
++import pytest
++from fastapi import FastAPI
++from fastapi.testclient import TestClient
++from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
++
++from spoolman.api.v1 import reorder, setting
++from spoolman.database.database import get_db_session
++from spoolman.database.models import Base, Filament, Spool, Vendor
++from spoolman.reorder import ReorderPolicy, calculate_reorders, profile_key, shopify_cart_url
++from spoolman.settings import parse_setting
++
++
++def row(grams=0, **extra):
++    return dict(profile="p", filament_id=1, remaining_g=grams, unused=False, **extra)
++
++
++@pytest.mark.parametrize(("grams","expected"),[(0,True),(149,True),(150,True),(151,False)])
++def test_threshold_boundaries(grams,expected):
++    assert bool(calculate_reorders([row(grams)],ReorderPolicy())) is expected
++
++
++def test_threshold_zero_and_overrides():
++    assert calculate_reorders([row(1)],ReorderPolicy(0))==[]
++    assert calculate_reorders([row(0)],ReorderPolicy(0))
++    assert calculate_reorders([row(149)],ReorderPolicy(),{"p":ReorderPolicy(100)})==[]
++    assert ReorderPolicy.from_dict({"threshold_g":0},ReorderPolicy(200,3,4))==ReorderPolicy(0,3,4)
++
++
++@pytest.mark.parametrize("reserves",[0,1,3])
++def test_reserves_and_order_quantities(reserves):
++    rows=[row(0)]+[dict(profile="p",filament_id=1,remaining_g=1000,unused=True) for _ in range(reserves)]
++    plan=calculate_reorders(rows,ReorderPolicy(unopened_min=3,order_qty=2))
++    assert bool(plan)==(reserves<3)
++    if plan: assert plan[0].order_qty==max(2,3-reserves)
++
++
++def test_unknown_archived_duplicate_and_zero_reserve():
++    assert calculate_reorders([row(None)],ReorderPolicy())==[]
++    assert calculate_reorders([row(0,archived=True)],ReorderPolicy())==[]
++    assert calculate_reorders([row(0)],ReorderPolicy(unopened_min=0))==[]
++    item=row(100,spool_id=9)
++    assert calculate_reorders([item,item],ReorderPolicy())[0].remaining_g==100
++
++
++def test_color_finish_and_delimiter_collisions():
++    a=dict(vendor="A",material="PLA",name="Red")
++    assert profile_key(**a,color="a")!=profile_key(**a,color="b")
++    assert profile_key(**a,finish="matte")!=profile_key(**a,finish="silk")
++    assert profile_key(vendor="a|b",material="c",name="")!=profile_key(vendor="a",material="b|c",name="")
++
++
++@pytest.mark.parametrize("origin",["http://shop.test","javascript:alert(1)","https://user:pass@shop.test",
++                                  "https://shop.test/path","https://shop.test?x=1","https://shop.test/#frag"])
++def test_shop_origin_rejections(origin):
++    assert shopify_cart_url(origin,[("123",1)]) is None
++
++
++def test_cart_rollover_empty_and_duplicate_variants():
++    assert shopify_cart_url("https://eu.store.bambulab.com",[("123",2),("123",3)])=="https://eu.store.bambulab.com/cart/123:5?storefront=true"
++    for bad in [[],[("unknown",1)],[("0",1)],[("١٢٣",1)],[("123",0)],[("123",True)]]:
++        assert shopify_cart_url("https://shop.test",bad) is None
++
++
++@pytest.mark.parametrize("value",[{"threshold_g":-1},{"threshold_g":True},{"threshold_g":float("nan")},
++                                  {"order_qty":0},{"unopened_min":1.5},{"unopened_min":True}])
++def test_invalid_settings_rejected(value):
++    with pytest.raises(ValueError): parse_setting("reorder_defaults").validate_type(json.dumps(value))
++
++
++def test_api_persistence_restart_reserve_and_inventory_unchanged(tmp_path,monkeypatch):
++    engine=create_async_engine("sqlite+aiosqlite:///"+str(tmp_path/"test.db"))
++    sessions=async_sessionmaker(engine,expire_on_commit=False)
++    async def seed():
++        async with engine.begin() as connection: await connection.run_sync(Base.metadata.create_all)
++        async with sessions() as db:
++            v=Vendor(id=1,name="Bambu Lab",registered=datetime.now(),extra=[])
++            f=Filament(id=1,name="Red",material="PLA",registered=datetime.now(),density=1.24,diameter=1.75,weight=1000,
++                       vendor=v,color_hex="ff0000",extra=[],tags=[])
++            f2=Filament(id=2,name="Red",material="PLA",registered=datetime.now(),density=1.24,diameter=1.75,weight=1000,
++                       vendor=v,color_hex="ff0000",extra=[],tags=[])
++            s=Spool(id=1,registered=datetime.now(),filament=f,initial_weight=0,used_weight=0,archived=False,extra=[],tags=[])
++            s2=Spool(id=2,registered=datetime.now(),filament=f2,initial_weight=1000,used_weight=990,archived=False,extra=[],tags=[])
++            db.add_all([s,s2]); await db.commit()
++    asyncio.run(seed())
++    def app():
++        api=FastAPI()
++        api.include_router(reorder.router);api.include_router(setting.router)
++        async def session():
++            async with sessions() as db: yield db
++        api.dependency_overrides[get_db_session]=session
++        return api
++    client=TestClient(app())
++    plan=client.get("/reorder")
++    assert plan.status_code==200,plan.text
++    assert len(plan.json())==1 and plan.json()[0]["remaining_g"]==10
++    key=plan.json()[0]["profile"]
++    assert client.post("/setting/reorder_defaults",json=json.dumps({"threshold_g":0,"unopened_min":1,"order_qty":3})).status_code==200
++    assert TestClient(app()).get("/reorder").json()==[]
++    assert client.post("/setting/reorder_defaults",json=json.dumps({"threshold_g":150})).status_code==200
++    assert client.post("/setting/reorder_providers",json=json.dumps({"base_url":"https://eu.store.bambulab.com","variants":{key:"123"}})).status_code==200
++    assert client.get("/reorder/cart").json()["url"].endswith("/cart/123:1?storefront=true")
++    assert client.post("/setting/reorder_defaults",json=json.dumps({"threshold_g":-1})).status_code==400
++    assert client.get("/reorder").status_code==200
++    async def add_reserve():
++        async with sessions() as db:
++            db.add(Spool(id=3,registered=datetime.now(),filament_id=1,initial_weight=1000,used_weight=0,
++                         location="Lager – ungeöffnet",archived=False,extra=[],tags=[]))
++            await db.commit()
++    asyncio.run(add_reserve())
++    assert client.get("/reorder").json()==[]
++    assert client.get("/reorder/cart").json()["url"] is None
++    async def verify():
++        async with sessions() as db:
++            assert (await db.get(Spool,1)).initial_weight==0
++            assert (await db.get(Spool,2)).used_weight==990
++        await engine.dispose()
++    asyncio.run(verify())
+--- /dev/null
++++ b/client_v2/src/lib/api/reorder.ts
+@@ -0,0 +1,48 @@
++import { getJson } from './http';
++
++export interface ReorderItem {
++	profile: string;
++	filament_id: number;
++	vendor: string | null;
++	material: string | null;
++	name: string | null;
++	color: string | null;
++	weight: number | null;
++	remaining_g: number;
++	unopened: number;
++	unknown_spools: number;
++	needs_reorder: boolean;
++	threshold_g: number;
++	unopened_min: number;
++	order_qty: number;
++	variant_id: string | null;
++	cart_url: string | null;
++}
++export interface Policy {
++	threshold_g: number;
++	unopened_min: number;
++	order_qty: number;
++}
++export interface CatalogVariant {
++	id: number;
++	title: string;
++	sku: string;
++	available: boolean;
++	option1: string;
++	option2: string;
++	option3: string;
++}
++export interface CatalogProduct {
++	title: string;
++	handle: string;
++	variants: CatalogVariant[];
++}
++export function getReorderPlan(signal?: AbortSignal): Promise<ReorderItem[]> {
++	return getJson('/reorder', { include_sufficient: 'true' }, signal);
++}
++export function getReorderCatalog(signal?: AbortSignal): Promise<CatalogProduct[]> {
++	return getJson('/reorder/catalog', {}, signal);
++}
++export function getReorderCart(): Promise<{ url: string | null; excluded: string[] }> {
++	return getJson('/reorder/cart');
++}
+--- a/client_v2/src/lib/components/NavTabs.svelte
++++ b/client_v2/src/lib/components/NavTabs.svelte
+@@ -7,6 +7,7 @@
+ 	const tabs = [
+ 		{ href: '/', label: m['nav.library'] },
+ 		{ href: '/dashboard', label: m['dashboard.dashboard'] },
++		{ href: '/reorder', label: m['reorder.title'] },
+ 		{ href: '/labels', label: m['nav.labels'] },
+ 		{ href: '/settings', label: m['settings.header'] }
+ 	] satisfies { href: Pathname; label: () => string }[];
+--- /dev/null
++++ b/client_v2/src/routes/reorder/+page.svelte
+@@ -0,0 +1,457 @@
++<script lang="ts">
++	import { onMount } from 'svelte';
++	import Card from '$components/Card.svelte';
++	import {
++		getReorderPlan,
++		getReorderCatalog,
++		getReorderCart,
++		type ReorderItem,
++		type Policy,
++		type CatalogProduct
++	} from '$lib/api/reorder';
++	import { getSettings, parseSetting, setSetting } from '$lib/api/settings';
++	import * as m from '$lib/paraglide/messages';
++	import { settings as sharedSettings } from '$lib/stores/settings.svelte';
++
++	let items = $state<ReorderItem[]>([]);
++	let defaults = $state<Policy>({ threshold_g: 150, unopened_min: 1, order_qty: 1 });
++	let profiles = $state<Record<string, Policy>>({});
++	let variants = $state<Record<string, string>>({});
++	let baseUrl = $state('');
++	let locations = $state('');
++	let catalog = $state<CatalogProduct[]>([]);
++	let loading = $state(true),
++		saving = $state(false),
++		showAll = $state(false);
++	let error = $state(''),
++		notice = $state(''),
++		cartUrl = $state<string | null>(null);
++	let excluded = $state(0),
++		dirty = $state(false);
++	const visible = $derived(items.filter((item) => showAll || item.needs_reorder || item.unknown_spools));
++	const needed = $derived(items.filter((item) => item.needs_reorder).length);
++
++	function changed() {
++		dirty = true;
++		cartUrl = null;
++		notice = '';
++	}
++	async function refresh() {
++		items = await getReorderPlan();
++		const cart = await getReorderCart();
++		cartUrl = cart.url;
++		excluded = cart.excluded.length;
++	}
++	onMount(() => {
++		const controller = new AbortController();
++		(async () => {
++			try {
++				const [plan, settings] = await Promise.all([
++					getReorderPlan(controller.signal),
++					getSettings(controller.signal)
++				]);
++				items = plan;
++				defaults = parseSetting(settings.reorder_defaults, {
++					threshold_g: 150,
++					unopened_min: 1,
++					order_qty: 1
++				});
++				profiles = parseSetting(settings.reorder_profiles, {});
++				const p = parseSetting(settings.reorder_providers, { base_url: '', variants: {} });
++				baseUrl = p.base_url;
++				variants = p.variants;
++				locations = parseSetting(settings.reorder_stock, {
++					unopened_locations: [] as string[]
++				}).unopened_locations.join('\n');
++				try {
++					catalog = await getReorderCatalog(controller.signal);
++				} catch {
++					notice = m['reorder.catalogError']();
++				}
++				if (!controller.signal.aborted) await refresh();
++			} catch (e) {
++				if (!controller.signal.aborted) error = String(e);
++			} finally {
++				loading = false;
++			}
++		})();
++		const timer = setInterval(() => {
++			if (!dirty && !saving) refresh().catch((e) => (error = String(e)));
++		}, 30000);
++		return () => {
++			controller.abort();
++			clearInterval(timer);
++		};
++	});
++	async function save() {
++		saving = true;
++		error = '';
++		notice = '';
++		cartUrl = null;
++		try {
++			if (Object.values(variants).some((id) => productUrl(id)) &&
++				baseUrl.trim().replace(/\/$/, '') !== 'https://eu.store.bambulab.com') {
++				throw new Error(m['reorder.origin']() + ': https://eu.store.bambulab.com');
++			}
++			await setSetting('reorder_defaults', defaults);
++			sharedSettings.lowThreshold = defaults.threshold_g;
++			await setSetting('reorder_profiles', profiles);
++			await setSetting('reorder_stock', {
++				unopened_locations: locations
++					.split('\n')
++					.map((v) => v.trim())
++					.filter(Boolean)
++			});
++			await setSetting('reorder_providers', { base_url: baseUrl.trim(), variants });
++			await refresh();
++			dirty = false;
++			notice = m['reorder.saved']();
++		} catch (e) {
++			error = String(e);
++			dirty = true;
++		} finally {
++			saving = false;
++		}
++	}
++	function override(item: ReorderItem, enabled: boolean) {
++		if (enabled)
++			profiles[item.profile] = {
++				threshold_g: item.threshold_g,
++				unopened_min: item.unopened_min,
++				order_qty: item.order_qty
++			};
++		else delete profiles[item.profile];
++		changed();
++	}
++	const norm = (s: string) =>
++		s
++			.toLowerCase()
++			.replace(/grey/g, 'gray')
++			.replace(/[^a-z0-9]+/g, '');
++	function suggest(item: ReorderItem) {
++		if (norm(item.vendor ?? '') !== 'bambulab') return '';
++		const matches = catalog.flatMap((p) =>
++			p.variants.filter((v) => {
++				const options = [v.option1, v.option2, v.option3].filter(Boolean);
++				const colour = options.find((o) => /\(\d{5}\)/.test(o))?.replace(/\s*\(\d+\)/, '') ?? '';
++				const names = [
++					colour,
++					p.title.replace(/^PLA\s+/, '') + ' ' + colour,
++					p.title.replace(/^PETG\s+/, '') + ' ' + colour
++				];
++				const mat = norm(item.material ?? '');
++				const materialOk =
++					mat === norm(p.title) ||
++					(mat === 'pla' && p.title.startsWith('PLA')) ||
++					(mat === 'petg' && p.title === 'PETG Translucent');
++				const weight = options.find((o) => /[\d.]\s*kg/i.test(o))?.match(/([\d.]+)\s*kg/i);
++				return (
++					materialOk &&
++					names.some((n) => norm(n) === norm(item.name ?? '')) &&
++					/refill/i.test(v.title) &&
++					weight &&
++					Number(weight[1]) * 1000 === item.weight
++				);
++			})
++		);
++		return matches.length === 1 ? String(matches[0].id) : '';
++	}
++	function fillSuggestions() {
++		if (baseUrl && baseUrl.trim().replace(/\/$/, '') !== 'https://eu.store.bambulab.com') {
++			error = m['reorder.origin']() + ': https://eu.store.bambulab.com';
++			return;
++		}
++		let n = 0;
++		for (const item of items)
++			if (!variants[item.profile]) {
++				const id = suggest(item);
++				if (id) {
++					variants[item.profile] = id;
++					n++;
++				}
++			}
++		if (n) {
++			if (!baseUrl) baseUrl = 'https://eu.store.bambulab.com';
++			changed();
++		}
++		notice = m['reorder.mapped']({ count: n });
++	}
++	function productUrl(id: string) {
++		const p = catalog.find((p) => p.variants.some((v) => String(v.id) === id));
++		return p ? 'https://eu.store.bambulab.com/products/' + p.handle + '?variant=' + id : null;
++	}
++</script>
++
++<svelte:head><title>{m['reorder.title']()}</title></svelte:head>
++<div class="page scroll-y">
++	<div class="wrap">
++		<h1>{m['reorder.title']()}</h1>
++		<p class="muted">{m['reorder.intro']()}</p>
++		{#if error}<div role="alert" class="error">{error}</div>{/if}
++		{#if loading}<p>{m['reorder.loading']()}</p>{:else}
++			<form
++				onsubmit={(e) => {
++					e.preventDefault();
++					save();
++				}}
++			>
++				<Card
++					><h2>{m['reorder.defaults']()}</h2>
++					<div class="fields">
++						<label
++							>{m['reorder.grams']()}<input
++								type="number"
++								min="0"
++								step="any"
++								required
++								bind:value={defaults.threshold_g}
++								oninput={changed}
++							/></label
++						>
++						<label
++							>{m['reorder.reserve']()}<input
++								type="number"
++								min="0"
++								step="1"
++								required
++								bind:value={defaults.unopened_min}
++								oninput={changed}
++							/></label
++						>
++						<label
++							>{m['reorder.quantity']()}<input
++								type="number"
++								min="1"
++								step="1"
++								required
++								bind:value={defaults.order_qty}
++								oninput={changed}
++							/></label
++						>
++					</div>
++					<label
++						>{m['reorder.locations']()}<textarea rows="2" bind:value={locations} oninput={changed}
++						></textarea></label
++					></Card
++				>
++				<details>
++					<summary>{m['reorder.shop']()}</summary><Card>
++						<label
++							>{m['reorder.origin']()}<input
++								type="url"
++								bind:value={baseUrl}
++								oninput={changed}
++								placeholder="https://eu.store.bambulab.com"
++							/></label
++						>
++						<p class="muted">{m['reorder.cartHint']()}</p>
++						{#if catalog.length}<button type="button" onclick={fillSuggestions}
++								>{m['reorder.autoMap']()}</button
++							>
++							<p class="muted">{catalog.length} {m['reorder.catalogProducts']()}</p>{/if}
++					</Card>
++				</details>
++				<div class="toolbar">
++					<h2>{needed} {m['reorder.required']()}</h2>
++					<label class="inline"
++						><input type="checkbox" bind:checked={showAll} />{m['reorder.showAll']()}</label
++					>
++				</div>
++				{#if !visible.length}<Card><p>{m['reorder.empty']()}</p></Card>{/if}
++				<div class="grid">
++					{#each visible as item (item.profile)}
++						<Card
++							><h3>{item.name ?? item.material ?? '#' + item.filament_id}</h3>
++							<p class="muted">{item.vendor ?? '—'} · {item.material ?? '—'}</p>
++							<p>{item.remaining_g.toFixed(0)} g · {item.unopened} {m['reorder.unopened']()}</p>
++							{#if item.unknown_spools}<p class="warning">{m['reorder.unknown']()}</p>{/if}
++							<label class="inline"
++								><input
++									type="checkbox"
++									checked={!!profiles[item.profile]}
++									onchange={(e) => override(item, e.currentTarget.checked)}
++								/>{m['reorder.custom']()}</label
++							>
++							{#if profiles[item.profile]}<div class="fields">
++									<label
++										>{m['reorder.grams']()}<input
++											type="number"
++											min="0"
++											step="any"
++											required
++											bind:value={profiles[item.profile].threshold_g}
++											oninput={changed}
++										/></label
++									>
++									<label
++										>{m['reorder.reserve']()}<input
++											type="number"
++											min="0"
++											step="1"
++											required
++											bind:value={profiles[item.profile].unopened_min}
++											oninput={changed}
++										/></label
++									>
++									<label
++										>{m['reorder.quantity']()}<input
++											type="number"
++											min="1"
++											step="1"
++											required
++											bind:value={profiles[item.profile].order_qty}
++											oninput={changed}
++										/></label
++									>
++								</div>{/if}
++							<p>{m['reorder.suggested']()}: {item.needs_reorder ? item.order_qty : 0}</p>
++							<label
++								>{m['reorder.variant']()}<input
++									bind:value={variants[item.profile]}
++									oninput={changed}
++									inputmode="numeric"
++									pattern="[0-9]*"
++								/></label
++							>
++							{#if catalog.length}<label
++									>{m['reorder.selectVariant']()}<select
++										bind:value={variants[item.profile]}
++										onchange={changed}
++									>
++										<option value="">{m['reorder.none']()}</option>
++										{#each catalog as p}{#each p.variants as v}<option value={String(v.id)}
++													>{p.title} · {v.title}{v.available
++														? ''
++														: ' · ' + m['reorder.unavailable']()}</option
++												>{/each}{/each}
++									</select></label
++								>{/if}
++							{@const url = productUrl(variants[item.profile] ?? '')}
++							{#if url}<a href={url} target="_blank" rel="noopener noreferrer">{m['reorder.product']()}</a
++								>{/if}
++						</Card>
++					{/each}
++				</div>
++				<div class="toolbar">
++					<button class="primary" type="submit" disabled={saving}
++						>{saving ? m['reorder.saving']() : m['reorder.save']()}</button
++					>
++					{#if cartUrl && !dirty}<a class="primary" href={cartUrl} target="_blank" rel="noopener noreferrer"
++							>{m['reorder.cart']()}</a
++						>{/if}
++				</div>
++				{#if excluded}<p class="warning">{m['reorder.excluded']({ count: excluded })}</p>{/if}
++				{#if notice}<p role="status">{notice}</p>{/if}
++			</form>
++		{/if}
++	</div>
++</div>
++
++<style>
++	.wrap {
++		max-width: 1160px;
++		margin: 0 auto;
++		padding: 28px;
++	}
++	h1 {
++		font-size: 1.7rem;
++	}
++	h2 {
++		font-size: 1.1rem;
++		margin: 0 0 14px;
++	}
++	h3 {
++		margin: 0;
++	}
++	.muted {
++		color: var(--text-dim);
++	}
++	.grid {
++		display: grid;
++		grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
++		gap: 16px;
++	}
++	.fields {
++		display: grid;
++		grid-template-columns: repeat(3, 1fr);
++		gap: 12px;
++		margin-bottom: 16px;
++	}
++	label {
++		display: flex;
++		flex-direction: column;
++		gap: 7px;
++		margin-top: 12px;
++		font-size: 0.88rem;
++	}
++	input,
++	textarea,
++	select {
++		width: 100%;
++		min-width: 0;
++		padding: 10px;
++		border: 1px solid var(--border);
++		border-radius: var(--radius);
++		background: var(--surface);
++		color: var(--text);
++	}
++	.inline {
++		flex-direction: row;
++		align-items: center;
++	}
++	.inline input {
++		width: auto;
++	}
++	.toolbar {
++		display: flex;
++		align-items: center;
++		justify-content: space-between;
++		gap: 12px;
++		margin: 22px 0;
++		flex-wrap: wrap;
++	}
++	button,
++	.primary {
++		padding: 10px 16px;
++		border-radius: var(--radius);
++		border: 1px solid var(--border);
++		background: var(--surface);
++		color: var(--text);
++		cursor: pointer;
++		text-decoration: none;
++	}
++	.primary {
++		background: var(--accent);
++		color: var(--bg);
++	}
++	button:disabled {
++		opacity: 0.6;
++		cursor: wait;
++	}
++	.error {
++		padding: 14px;
++		background: #b4231820;
++		color: #c94242;
++	}
++	.warning {
++		color: var(--warning, #b27e21);
++	}
++	details {
++		margin: 18px 0;
++	}
++	summary {
++		cursor: pointer;
++		margin-bottom: 10px;
++	}
++	@media (max-width: 650px) {
++		.wrap {
++			padding: 20px 14px;
++		}
++		.fields {
++			grid-template-columns: 1fr;
++		}
++		.toolbar {
++			align-items: flex-start;
++		}
++	}
++</style>
+--- a/client_v2/src/lib/stores/settings.svelte.ts
++++ b/client_v2/src/lib/stores/settings.svelte.ts
+@@ -1,10 +1,6 @@
+ import { getSettings, setSetting, parseSetting } from '$lib/api/settings';
+ 
+-// Server-backed user settings (currency, round_prices, base_url) plus one
+-// client-only preference (low-stock threshold, persisted to localStorage — the
+-// backend has no such setting).
+-
+-const LOW_THRESHOLD_KEY = 'spoolman-v2-low-threshold';
++// Shared settings, including the default low-stock/reorder policy.
+ 
+ class Settings {
+ 	currency = $state('EUR');
+@@ -12,17 +8,16 @@
+ 	baseUrl = $state('');
+ 	lowThreshold = $state(150);
+ 	loaded = $state(false);
++	private reorderDefaults = {threshold_g: 150, unopened_min: 1, order_qty: 1};
+ 
+ 	async load() {
+-		if (typeof localStorage !== 'undefined') {
+-			const stored = localStorage.getItem(LOW_THRESHOLD_KEY);
+-			if (stored) this.lowThreshold = Number(stored) || this.lowThreshold;
+-		}
+ 		try {
+ 			const s = await getSettings();
+ 			this.currency = parseSetting(s.currency, 'EUR');
+ 			this.roundPrices = parseSetting(s.round_prices, false);
+ 			this.baseUrl = parseSetting(s.base_url, '');
++			this.reorderDefaults = parseSetting(s.reorder_defaults, {threshold_g:150, unopened_min:1, order_qty:1});
++			this.lowThreshold = this.reorderDefaults.threshold_g;
+ 		} catch (e) {
+ 			console.error('Failed to load settings', e);
+ 		} finally {
+@@ -42,9 +37,12 @@
+ 		this.baseUrl = v;
+ 		await setSetting('base_url', v);
+ 	}
+-	setLowThreshold(v: number) {
++	async setLowThreshold(v: number) {
++		const current = parseSetting((await getSettings()).reorder_defaults, this.reorderDefaults);
++		const next = {...current, threshold_g:v};
++		await setSetting('reorder_defaults',next);
++		this.reorderDefaults = next;
+ 		this.lowThreshold = v;
+-		if (typeof localStorage !== 'undefined') localStorage.setItem(LOW_THRESHOLD_KEY, String(v));
+ 	}
+ 
+ 	/** A spool is "low" when in use and at/under the threshold. */
+--- a/client_v2/src/routes/settings/+page.svelte
++++ b/client_v2/src/routes/settings/+page.svelte
+@@ -54,7 +54,7 @@
+ 	function saveThreshold(v: string) {
+ 		thresholdDraft = v;
+ 		thresholdStored = parseDecimal(v) ?? 0;
+-		settings.setLowThreshold(thresholdStored);
++		trackSave(settings.setLowThreshold(thresholdStored));
+ 	}
+ 
+ 	let localeData = locales.map((code) => {
+--- a/client_v2/locales/en/common.json
++++ b/client_v2/locales/en/common.json
+@@ -617,5 +617,37 @@
+     "vendor.fields.name": "Name",
+     "vendor.fields.registered": "Registered",
+     "vendor.fieldsHelp.emptySpoolWeight": "The weight of an empty spool from this manufacturer.",
+-    "yes": "Yes"
++    "yes": "Yes",
++    "reorder.title": "Reorder",
++    "reorder.intro": "Plan replacement stock. Settings are shared by all browsers; inventory is never changed.",
++    "reorder.defaults": "Default stock policy",
++    "reorder.grams": "Threshold (g)",
++    "reorder.reserve": "Unopened minimum (spools)",
++    "reorder.quantity": "Order quantity (spools)",
++    "reorder.locations": "Unopened storage locations (one per line)",
++    "reorder.shop": "Optional shop and article mapping",
++    "reorder.origin": "Shop HTTPS address",
++    "reorder.cartHint": "This opens a prepared cart. You review the items and pay in the shop yourself. Shop availability can change.",
++    "reorder.autoMap": "Match verified Bambu refill variants",
++    "reorder.catalogProducts": "catalog products",
++    "reorder.required": "profiles need reordering",
++    "reorder.showAll": "Show all profiles",
++    "reorder.empty": "No reorder required.",
++    "reorder.unopened": "unopened",
++    "reorder.unknown": "Unknown weight: automatic ordering is paused for this profile.",
++    "reorder.custom": "Use a custom stock policy",
++    "reorder.suggested": "Suggested order quantity",
++    "reorder.variant": "Verified Shopify variant ID",
++    "reorder.selectVariant": "Choose catalog variant and packaging",
++    "reorder.none": "No mapping",
++    "reorder.unavailable": "unavailable in snapshot",
++    "reorder.product": "View product",
++    "reorder.saving": "Saving…",
++    "reorder.save": "Save and recalculate",
++    "reorder.cart": "Open prepared cart",
++    "reorder.excluded": "{{count}} profiles have no verified mapping and are excluded from the cart.",
++    "reorder.saved": "Saved and recalculated.",
++    "reorder.catalogError": "The optional catalog is unavailable. Manual mapping is still possible.",
++    "reorder.mapped": "{{count}} verified refill variants matched. Save to apply.",
++    "reorder.loading": "Loading stock…"
+ }
+--- a/client_v2/locales/de/common.json
++++ b/client_v2/locales/de/common.json
+@@ -616,5 +616,37 @@
+     "vendor.fields.name": "Name",
+     "vendor.fields.registered": "Registriert",
+     "vendor.fieldsHelp.emptySpoolWeight": "Das Gewicht einer leeren Spule von diesem Hersteller.",
+-    "yes": "Ja"
++    "yes": "Ja",
++    "reorder.title": "Nachbestellen",
++    "reorder.intro": "Ersatzrollen planen. Einstellungen gelten für alle Browser; der Lagerbestand wird nicht verändert.",
++    "reorder.defaults": "Allgemeine Bestandsregeln",
++    "reorder.grams": "Schwelle (g)",
++    "reorder.reserve": "Ungeöffneter Mindestvorrat (Rollen)",
++    "reorder.quantity": "Bestellmenge (Rollen)",
++    "reorder.locations": "Lagerorte für ungeöffnete Rollen (einer pro Zeile)",
++    "reorder.shop": "Optionaler Shop und Artikelzuordnung",
++    "reorder.origin": "HTTPS-Adresse des Shops",
++    "reorder.cartHint": "Der Button öffnet einen vorbereiteten Warenkorb. Prüfen und bezahlen kannst du anschließend selbst im Shop. Verfügbarkeit kann sich ändern.",
++    "reorder.autoMap": "Verifizierte Bambu-Refills zuordnen",
++    "reorder.catalogProducts": "Katalogprodukte",
++    "reorder.required": "Profile zum Nachbestellen",
++    "reorder.showAll": "Alle Profile anzeigen",
++    "reorder.empty": "Aktuell ist keine Nachbestellung nötig.",
++    "reorder.unopened": "ungeöffnet",
++    "reorder.unknown": "Gewicht unbekannt: Für dieses Profil wird keine automatische Bestellung vorgeschlagen.",
++    "reorder.custom": "Eigene Bestandsregel verwenden",
++    "reorder.suggested": "Vorgeschlagene Bestellmenge",
++    "reorder.variant": "Verifizierte Shopify-Variantennummer",
++    "reorder.selectVariant": "Katalogartikel und Verpackung wählen",
++    "reorder.none": "Keine Zuordnung",
++    "reorder.unavailable": "laut Katalog nicht lieferbar",
++    "reorder.product": "Produkt ansehen",
++    "reorder.saving": "Wird gespeichert…",
++    "reorder.save": "Speichern und neu berechnen",
++    "reorder.cart": "Vorbereiteten Warenkorb öffnen",
++    "reorder.excluded": "{{count}} Profile ohne verifizierte Zuordnung fehlen im Warenkorb.",
++    "reorder.saved": "Gespeichert und neu berechnet.",
++    "reorder.catalogError": "Der optionale Katalog ist nicht erreichbar. Manuelle Zuordnung ist weiterhin möglich.",
++    "reorder.mapped": "{{count}} verifizierte Refill-Varianten zugeordnet. Zum Übernehmen speichern.",
++    "reorder.loading": "Bestand wird geladen…"
+ }

@@ -1,0 +1,8 @@
+{
+  "provider": "Bambu Lab EU",
+  "source": "https://bambulab-eu.myshopify.com/products.json",
+  "retrieved": "2026-10-29T19:02:16.508563+00:00",
+  "products": 33,
+  "variants": 259,
+  "note": "Public EU catalog snapshot. Shop availability and future products can change."
+}

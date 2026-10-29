@@ -1,20 +1,30 @@
 name: Spoolman Reorder Upgrade
-version: "0.27.0-reorder.1"
+version: "0.27.0-reorder.2"
 slug: spoolman_reorder
-description: Spoolman mit Nachbestellplanung und Bambu-EU-Katalog
-url: https://github.com/Donkie/Spoolman
+description: Nachbestellplanung mit gemeinsam gespeicherten Schwellen und optionalem Bambu-EU-Katalog
+url: https://github.com/OrbitNestLab/spoolman-reorder-upgrade
 arch:
   - amd64
+  - aarch64
 startup: application
-boot: auto
+boot: manual
 init: false
 ports:
-  7912/tcp: 7912
+  7912/tcp: 7913
 ports_description:
-  7912/tcp: Spoolman API
+  7912/tcp: Testoberfläche (eigene Kopie des Bestands)
+webui: http://[HOST]:[PORT:7912]/reorder
 map:
-  - type: data
-    read_only: false
-    path: /data
-options: {}
-schema: {}
+  - type: all_app_configs
+    read_only: true
+    path: /app_configs
+options:
+  import_from_app: ""
+  debug: false
+  legacy_client: false
+  cors_origin: ""
+schema:
+  import_from_app: str
+  debug: bool
+  legacy_client: bool
+  cors_origin: str
