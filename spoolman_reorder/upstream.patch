@@ -485,7 +485,7 @@
  	] satisfies { href: Pathname; label: () => string }[];
 --- /dev/null
 +++ b/client_v2/src/routes/reorder/+page.svelte
-@@ -0,0 +1,457 @@
+@@ -0,0 +1,453 @@
 +<script lang="ts">
 +	import { onMount } from 'svelte';
 +	import Card from '$components/Card.svelte';
@@ -577,9 +577,8 @@
 +		notice = '';
 +		cartUrl = null;
 +		try {
-+			if (Object.values(variants).some((id) => productUrl(id)) &&
-+				baseUrl.trim().replace(/\/$/, '') !== 'https://eu.store.bambulab.com') {
-+				throw new Error(m['reorder.origin']() + ': https://eu.store.bambulab.com');
++			if (baseUrl.trim() && Object.values(variants).some((id) => productUrl(id))) {
++				throw new Error(m['reorder.cartUnavailable']());
 +			}
 +			await setSetting('reorder_defaults', defaults);
 +			sharedSettings.lowThreshold = defaults.threshold_g;
@@ -645,10 +644,6 @@
 +		return matches.length === 1 ? String(matches[0].id) : '';
 +	}
 +	function fillSuggestions() {
-+		if (baseUrl && baseUrl.trim().replace(/\/$/, '') !== 'https://eu.store.bambulab.com') {
-+			error = m['reorder.origin']() + ': https://eu.store.bambulab.com';
-+			return;
-+		}
 +		let n = 0;
 +		for (const item of items)
 +			if (!variants[item.profile]) {
@@ -659,7 +654,6 @@
 +				}
 +			}
 +		if (n) {
-+			if (!baseUrl) baseUrl = 'https://eu.store.bambulab.com';
 +			changed();
 +		}
 +		notice = m['reorder.mapped']({ count: n });
@@ -675,6 +669,7 @@
 +	<div class="wrap">
 +		<h1>{m['reorder.title']()}</h1>
 +		<p class="muted">{m['reorder.intro']()}</p>
++		{#if catalog.length && !baseUrl.trim()}<p class="warning">{m['reorder.cartUnavailable']()}</p>{/if}
 +		{#if error}<div role="alert" class="error">{error}</div>{/if}
 +		{#if loading}<p>{m['reorder.loading']()}</p>{:else}
 +			<form
@@ -733,6 +728,7 @@
 +							/></label
 +						>
 +						<p class="muted">{m['reorder.cartHint']()}</p>
++						{#if catalog.length}<p class="warning">{m['reorder.cartUnavailable']()}</p>{/if}
 +						{#if catalog.length}<button type="button" onclick={fillSuggestions}
 +								>{m['reorder.autoMap']()}</button
 +							>
@@ -1006,7 +1002,7 @@
  	let localeData = locales.map((code) => {
 --- a/client_v2/locales/en/common.json
 +++ b/client_v2/locales/en/common.json
-@@ -617,5 +617,37 @@
+@@ -617,5 +617,38 @@
      "vendor.fields.name": "Name",
      "vendor.fields.registered": "Registered",
      "vendor.fieldsHelp.emptySpoolWeight": "The weight of an empty spool from this manufacturer.",
@@ -1041,15 +1037,16 @@
 +    "reorder.saving": "Saving…",
 +    "reorder.save": "Save and recalculate",
 +    "reorder.cart": "Open prepared cart",
-+    "reorder.excluded": "{{count}} profiles have no verified mapping and are excluded from the cart.",
++    "reorder.excluded": "{{count}} profiles have no usable direct cart link. Please check their product links.",
 +    "reorder.saved": "Saved and recalculated.",
 +    "reorder.catalogError": "The optional catalog is unavailable. Manual mapping is still possible.",
 +    "reorder.mapped": "{{count}} verified refill variants matched. Save to apply.",
-+    "reorder.loading": "Loading stock…"
++    "reorder.loading": "Loading stock…",
++    "reorder.cartUnavailable": "Bambu's current storefront does not support the tested Shopify cart link. Leave the shop address empty and use the product links. No order is placed."
 +}
 --- a/client_v2/locales/de/common.json
 +++ b/client_v2/locales/de/common.json
-@@ -616,5 +616,37 @@
+@@ -616,5 +616,38 @@
      "vendor.fields.name": "Name",
      "vendor.fields.registered": "Registriert",
      "vendor.fieldsHelp.emptySpoolWeight": "Das Gewicht einer leeren Spule von diesem Hersteller.",
@@ -1082,9 +1079,10 @@
 +    "reorder.saving": "Wird gespeichert…",
 +    "reorder.save": "Speichern und neu berechnen",
 +    "reorder.cart": "Vorbereiteten Warenkorb öffnen",
-+    "reorder.excluded": "{{count}} Profile ohne verifizierte Zuordnung fehlen im Warenkorb.",
++    "reorder.excluded": "{{count}} Profile haben keinen verwendbaren Direktwarenkorb-Link. Bitte die Produktlinks prüfen.",
 +    "reorder.saved": "Gespeichert und neu berechnet.",
 +    "reorder.catalogError": "Der optionale Katalog ist nicht erreichbar. Manuelle Zuordnung ist weiterhin möglich.",
 +    "reorder.mapped": "{{count}} verifizierte Refill-Varianten zugeordnet. Zum Übernehmen speichern.",
-+    "reorder.loading": "Bestand wird geladen…"
++    "reorder.loading": "Bestand wird geladen…",
++    "reorder.cartUnavailable": "Bambus aktueller Shop unterstützt den geprüften Shopify-Warenkorb-Link nicht. Shop-Adresse leer lassen und die Produktlinks verwenden. Es wird nichts bestellt."
  }
