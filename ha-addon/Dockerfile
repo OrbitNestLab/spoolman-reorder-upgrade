@@ -1,9 +1,6 @@
-Traceback (most recent call last):
-  File "<string>", line 1, in <module>
-  File "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/pathlib.py", line 1256, in read_text
-    with self.open(mode='r', encoding=encoding, errors=errors) as f:
-  File "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/pathlib.py", line 1242, in open
-    return io.open(self, mode, buffering, encoding, errors, newline,
-  File "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/pathlib.py", line 1110, in _opener
-    return self._accessor.open(self, flags, mode)
-FileNotFoundError: [Errno 2] No such file or directory: 'ha-addon/Dockerfile'
+ARG BUILD_FROM=2c829f0e/amd64-addon-spoolman:0.27.0-0
+FROM ${BUILD_FROM}
+COPY spoolman/settings.py /home/app/spoolman/spoolman/settings.py
+COPY spoolman/reorder.py /home/app/spoolman/spoolman/reorder.py
+COPY spoolman/bambu_eu_catalog.json /home/app/spoolman/spoolman/bambu_eu_catalog.json
+COPY spoolman/api/v1/reorder.py /home/app/spoolman/spoolman/api/v1/reorder.py
