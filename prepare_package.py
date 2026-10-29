@@ -1,11 +1,18 @@
 """Generate the reviewable patch against the exact currently installed upstream."""
 import difflib
+import argparse
 import json
 import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-UPSTREAM = ROOT.parent / "spoolman-upstream"
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("--upstream", type=Path, default=ROOT.parent/"spoolman-upstream")
+parser.add_argument("--modified", type=Path, default=ROOT/"source")
+args = parser.parse_args()
+UPSTREAM = args.upstream
+if not (UPSTREAM/".git").exists() or not (args.modified/"spoolman").is_dir():
+    parser.error("Provide an upstream Git checkout with the base commit and a modified source tree.")
 BASE = "bed3f14ee77a3a571d31b14215d54b0b88a7519c"
 FILES = [
     "spoolman/reorder.py", "spoolman/settings.py", "spoolman/api/v1/reorder.py",
@@ -19,7 +26,7 @@ patches = []
 for name in FILES:
     old = subprocess.run(["git", "show", f"{BASE}:{name}"], cwd=UPSTREAM, capture_output=True, text=True)
     before = old.stdout if old.returncode == 0 else ""
-    after = (ROOT / "source" / name).read_text()
+    after = (args.modified / name).read_text()
     if "/locales/" in name:
         original, current = json.loads(before), json.loads(after)
         original.update({k:v for k,v in current.items() if k.startswith("reorder.")})
