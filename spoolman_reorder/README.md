@@ -52,6 +52,19 @@ Bestand und löst weder Kauf noch Zahlung aus. Fehlende Zuordnungen
 werden angezeigt und im Link ausgelassen. Einzelne Produktlinks helfen
 beim Prüfen. Lagerverfügbarkeit muss im Shop geprüft werden.
 
+### Aktuelle Einschränkung beim Bambu-Shop
+
+Am 29.10.2026 wurde der konkrete Multi-Item-Link anonym per HTTP geprüft:
+Die EU-Shop-Oberfläche antwortet auf /cart/VARIANT:QTY mit HTTP 404.
+Die zugehörige myshopify.com-Adresse liefert zwar eine Warenkorbseite,
+leitet aber per JavaScript zur Bambu-Startseite um. Ein alternativer
+Checkout-Aufruf war per API nicht verlässlich erreichbar.
+Deshalb ist für Bambu derzeit kein direkter Warenkorb freigegeben.
+Die Shop-Adresse bleibt leer; die Artikelzuordnungen und Produktlinks
+bleiben verwendbar. Eine erfolgreiche HTTP-Antwort alleine gilt nicht
+als bestätigter Warenkorb. Für andere kompatible Shopify-Shops bleibt
+die generische Permalink-Funktion verfügbar.
+
 ## API und Tests
 
 - GET /api/v1/reorder: erforderliche Bestellungen
