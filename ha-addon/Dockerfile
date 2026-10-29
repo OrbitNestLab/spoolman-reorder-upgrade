@@ -4,3 +4,4 @@ COPY spoolman/settings.py /home/app/spoolman/spoolman/settings.py
 COPY spoolman/reorder.py /home/app/spoolman/spoolman/reorder.py
 COPY spoolman/bambu_eu_catalog.json /home/app/spoolman/spoolman/bambu_eu_catalog.json
 COPY spoolman/api/v1/reorder.py /home/app/spoolman/spoolman/api/v1/reorder.py
+COPY spoolman/api/v1/router.py /home/app/spoolman/spoolman/api/v1/router.py
