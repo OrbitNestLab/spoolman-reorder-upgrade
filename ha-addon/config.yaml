@@ -1,0 +1,20 @@
+name: Spoolman Reorder Upgrade
+version: "0.27.0-reorder.1"
+slug: spoolman_reorder
+description: Spoolman mit Nachbestellplanung und Bambu-EU-Katalog
+url: https://github.com/Donkie/Spoolman
+arch:
+  - amd64
+startup: application
+boot: auto
+init: false
+ports:
+  7912/tcp: 7912
+ports_description:
+  7912/tcp: Spoolman API
+map:
+  - type: data
+    read_only: false
+    path: /data
+options: {}
+schema: {}
