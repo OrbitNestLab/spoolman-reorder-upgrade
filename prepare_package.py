@@ -24,12 +24,16 @@ for name in FILES:
         original, current = json.loads(before), json.loads(after)
         original.update({k:v for k,v in current.items() if k.startswith("reorder.")})
         after = json.dumps(original, indent=4, ensure_ascii=False) + "\n"
-    patches.extend(difflib.unified_diff((before.rstrip("\n")+"\n").splitlines(True) if before else [],
-                   (after.rstrip("\n")+"\n").splitlines(True),
-                   fromfile=f"a/{name}" if before else "/dev/null", tofile=f"b/{name}"))
+    for line in difflib.unified_diff(before.splitlines(True), after.splitlines(True),
+                   fromfile=f"a/{name}" if before else "/dev/null", tofile=f"b/{name}"):
+        patches.append(line if line.endswith("\n") else line + "\n\\ No newline at end of file\n")
 (ROOT / "spoolman_reorder/upstream.patch").write_text("".join(patches))
 
-catalog = json.loads(subprocess.check_output(["git","show","50ee57c:spoolman/bambu_eu_catalog.json"],cwd=UPSTREAM))
+catalog_path = ROOT/"spoolman_reorder/bambu_eu_catalog.json"
+if catalog_path.exists():
+    catalog = json.loads(catalog_path.read_text())
+else:
+    catalog = json.loads(subprocess.check_output(["git","show","50ee57c:spoolman/bambu_eu_catalog.json"],cwd=UPSTREAM))
 catalog = [p for p in catalog if not p["title"].startswith("PC4-")]
 variants = [v for p in catalog for v in p["variants"]]
 assert len({v["id"] for v in variants}) == len(variants)
