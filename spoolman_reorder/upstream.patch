@@ -1011,6 +1011,8 @@
      "vendor.fields.registered": "Registered",
      "vendor.fieldsHelp.emptySpoolWeight": "The weight of an empty spool from this manufacturer.",
 -    "yes": "Yes"
+-}
+\ No newline at end of file
 +    "yes": "Yes",
 +    "reorder.title": "Reorder",
 +    "reorder.intro": "Plan replacement stock. Settings are shared by all browsers; inventory is never changed.",
@@ -1044,7 +1046,7 @@
 +    "reorder.catalogError": "The optional catalog is unavailable. Manual mapping is still possible.",
 +    "reorder.mapped": "{{count}} verified refill variants matched. Save to apply.",
 +    "reorder.loading": "Loading stock…"
- }
++}
 --- a/client_v2/locales/de/common.json
 +++ b/client_v2/locales/de/common.json
 @@ -616,5 +616,37 @@
