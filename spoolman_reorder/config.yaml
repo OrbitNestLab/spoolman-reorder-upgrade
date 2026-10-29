@@ -1,5 +1,5 @@
 name: Spoolman Reorder Upgrade
-version: "0.27.0-reorder.2"
+version: "0.27.0-reorder.3"
 slug: spoolman_reorder
 description: Nachbestellplanung mit gemeinsam gespeicherten Schwellen und optionalem Bambu-EU-Katalog
 url: https://github.com/OrbitNestLab/spoolman-reorder-upgrade
