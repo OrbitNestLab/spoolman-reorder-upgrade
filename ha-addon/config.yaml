@@ -1,9 +1,20 @@
-Traceback (most recent call last):
-  File "<string>", line 1, in <module>
-  File "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/pathlib.py", line 1256, in read_text
-    with self.open(mode='r', encoding=encoding, errors=errors) as f:
-  File "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/pathlib.py", line 1242, in open
-    return io.open(self, mode, buffering, encoding, errors, newline,
-  File "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/pathlib.py", line 1110, in _opener
-    return self._accessor.open(self, flags, mode)
-FileNotFoundError: [Errno 2] No such file or directory: 'ha-addon/config.yaml'
+name: Spoolman Reorder Upgrade
+version: "0.27.0-reorder.1"
+slug: spoolman_reorder
+description: Spoolman mit Nachbestellplanung und Bambu-EU-Katalog
+url: https://github.com/Donkie/Spoolman
+arch:
+  - amd64
+startup: application
+boot: auto
+init: false
+ports:
+  7912/tcp: 7912
+ports_description:
+  7912/tcp: Spoolman API
+map:
+  - type: data
+    read_only: false
+    path: /data
+options: {}
+schema: {}
