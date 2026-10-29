@@ -1,9 +1,9 @@
-Traceback (most recent call last):
-  File "<string>", line 1, in <module>
-  File "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/pathlib.py", line 1256, in read_text
-    with self.open(mode='r', encoding=encoding, errors=errors) as f:
-  File "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/pathlib.py", line 1242, in open
-    return io.open(self, mode, buffering, encoding, errors, newline,
-  File "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/pathlib.py", line 1110, in _opener
-    return self._accessor.open(self, flags, mode)
-FileNotFoundError: [Errno 2] No such file or directory: 'ha-addon/README.md'
+# Spoolman Reorder Upgrade
+
+Lokales Home-Assistant-Add-on auf Basis der vorhandenen Spoolman-Version.
+Die Daten unter /data bleiben erhalten. Das Add-on enthält die
+Nachbestell-API und den versionierten Bambu-EU-Katalog.
+
+Installation: Dieses Verzeichnis als lokales Add-on-Repository im Home
+Assistant Supervisor hinterlegen und das Add-on bauen. Vorher das vorhandene
+Spoolman-Backup verwenden.
